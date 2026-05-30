@@ -283,63 +283,69 @@ pub async fn run_vpn(is_starting_point: bool) {
         .expect("Failed to execute command");
 
     // Download and start VPN
-    let blocking_task = spawn(async move {
+    let started = spawn(async move {
         let client = Client::new();
-        
-        // Download OVPN file
+
         let ovpn_url = format!(
             "https://labs.hackthebox.com/api/v4/access/ovpnfile/{}/{}",
             server.id, vpn_tcp_flag
         );
-        
+
         let ovpn_response = client
             .get(ovpn_url)
             .header("Authorization", format!("Bearer {}", appkey))
             .send()
             .await;
 
-        match ovpn_response {
-            Ok(response) => {
-                if response.status().is_success() {
-                    let ovpn_content = response.text().await.unwrap();
-                    let ovpn_file_path = format!("{}/lab-vpn.ovpn", std::env::var("HOME").unwrap_or_default());
-                    
-                    if let Err(err) = fs::write(&ovpn_file_path, ovpn_content) {
-                        eprintln!("Error writing to file: {err}");
-                        std::process::exit(1);
-                    } else {
-                        println!("VPN config file saved successfully.");
-                    }
-
-                    let status = Command::new("sudo")
-                        .arg("openvpn")
-                        .arg("--config")
-                        .arg(ovpn_file_path)
-                        .arg("--daemon")
-                        .status()
-                        .expect("Failed to execute openvpn command");
-                        
-                    if status.success() {
-                        println!("{BGREEN}OpenVPN started successfully{RESET}");
-                    } else {
-                        eprintln!("\x1B[31mOpenVPN process exited with error: {status:?}\x1B[0m");
-                        std::process::exit(1);
-                    }
-                } else {
-                    eprintln!("\x1B[31mAPI call failed with status: {}\x1B[0m", response.status());
-                    std::process::exit(1);
-                }
-            }
+        let response = match ovpn_response {
+            Ok(r) => r,
             Err(err) => {
                 eprintln!("\x1B[31mAPI call error: {err:?}\x1B[0m");
-                std::process::exit(1);
+                return false;
             }
+        };
+
+        if !response.status().is_success() {
+            eprintln!("\x1B[31mAPI call failed with status: {}\x1B[0m", response.status());
+            return false;
         }
-    });
 
-    blocking_task.await.expect("Blocking task failed");
-    thread::sleep(Duration::from_secs(5));
+        let ovpn_content = response.text().await.unwrap();
+        let ovpn_file_path = format!(
+            "{}/lab-vpn.ovpn",
+            std::env::var("HOME").unwrap_or_default()
+        );
 
-    println!("\n{BGREEN}You are running OpenVPN in background.{RESET}");
-    println!("To terminate it, close this window or run: sudo killall openvpn");
+        if let Err(err) = fs::write(&ovpn_file_path, ovpn_content) {
+            eprintln!("Error writing to file: {err}");
+            return false;
+        }
+        println!("VPN config file saved successfully.");
+
+        let status = Command::new("sudo")
+            .arg("openvpn")
+            .arg("--config")
+            .arg(&ovpn_file_path)
+            .arg("--daemon")
+            .status()
+            .expect("Failed to execute openvpn command");
+
+        if !status.success() {
+            eprintln!("\x1B[31mOpenVPN process exited with error: {status:?}\x1B[0m");
+            return false;
+        }
+
+        println!("{BGREEN}OpenVPN started successfully{RESET}");
+        true
+    })
+    .await
+    .expect("Blocking task failed");
+
+    if started {
+        thread::sleep(Duration::from_secs(5));
+    } else {
+        std::process::exit(1);
+        //println!("\n{BGREEN}You are running OpenVPN in background.{RESET}");
+        //println!("To terminate it, close this window or run: sudo killall openvpn");
+    }
 }
