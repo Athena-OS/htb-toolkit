@@ -67,10 +67,33 @@ pub async fn get_ip (appkey: &str) -> String {
                         }
                     }
                     else {
-                        let machine_name = info.get("name").and_then(|t| t.as_str()).expect("Machine name not found").to_string();
-                        let machine_info = PlayingMachine::get_machine(&machine_name, appkey).await;
-                        machine_ip = machine_info.ip;
-                        return machine_ip;
+                        // Regular machines: the profile endpoint can still return
+                        // "ip": null for a few seconds right after spawn, so poll
+                        // until it's populated instead of returning immediately.
+                        let machine_name = info
+                            .get("name")
+                            .and_then(|t| t.as_str())
+                            .expect("Machine name not found")
+                            .to_string();
+
+                        let max_attempts = 10; // ~5 min cap at 30s per attempt
+                        for attempt in 1..=max_attempts {
+                            let machine_info =
+                                PlayingMachine::get_machine(&machine_name, appkey).await;
+                            machine_ip = machine_info.ip;
+
+                            if !machine_ip.is_empty() && machine_ip != "null" {
+                                return machine_ip;
+                            }
+
+                            if attempt < max_attempts {
+                                println!("Retrieving machine IP address... Wait 30 seconds...");
+                                sleep(Duration::from_secs(30));
+                            }
+                        }
+
+                        eprintln!("\x1B[31mCould not retrieve the machine IP address after {max_attempts} attempts.\x1B[0m");
+                        return machine_ip; // returns ""/"null"; caller can decide
                     }
                 }
             }
@@ -348,7 +371,7 @@ impl PlayingMachine {
                     },
                     sp_flag: false,
                     os,
-                    ip: entry["ip"].as_str().unwrap_or("null").to_string(),
+                    ip: entry["ip"].as_str().unwrap_or_default().to_string(),
                     review: entry["authUserHasReviewed"].as_bool().unwrap_or(false),
                 }         
             }

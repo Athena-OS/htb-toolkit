@@ -24,6 +24,27 @@ pub fn check_root() {
     }
 }
 
+// HTB's VPN usually comes up as tun0, but it can be tun1, tun2, or a
+// WireGuard-style interface. Try the common names first, then fall back to any
+// interface whose name looks like a VPN tunnel. Never panics.
+fn get_vpn_interface_ip() -> Option<String> {
+    for name in ["tun0", "tun1", "tun2"] {
+        if let Some(ip) = get_interface_ip(name) {
+            return Some(ip);
+        }
+    }
+    for iface in datalink::interfaces() {
+        if iface.name.starts_with("tun") || iface.name.starts_with("wg") {
+            for addr in &iface.ips {
+                if let IpAddr::V4(v4) = addr.ip() {
+                    return Some(v4.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 pub fn change_shell(machine_info: &mut PlayingMachine, user_info: &mut PlayingUser) {
     let result = std::env::var("SHELL").unwrap_or_default();
     let mut file_bak = String::new();
@@ -39,7 +60,7 @@ pub fn change_shell(machine_info: &mut PlayingMachine, user_info: &mut PlayingUs
             machine_info.machine.name,
             machine_info.ip,
             user_info.user.name,
-            get_interface_ip("tun0").expect("Error on getting tun0 IP address"),
+            get_vpn_interface_ip().unwrap_or_else(|| "N/A".to_string()),
             machine_info.machine.points
         );
         prompt_field = "PS1=.*";
@@ -62,7 +83,7 @@ end"#,
             machine_info.machine.name,
             machine_info.ip,
             user_info.user.name,
-            get_interface_ip("tun0").expect("Error on getting tun0 IP address"),
+            get_vpn_interface_ip().unwrap_or_else(|| "N/A".to_string()),
             machine_info.machine.points
         );
     } else if result.contains("zsh") {
@@ -73,7 +94,7 @@ end"#,
             machine_info.machine.name,
             machine_info.ip,
             user_info.user.name,
-            get_interface_ip("tun0").expect("Error on getting tun0 IP address"),
+            get_vpn_interface_ip().unwrap_or_else(|| "N/A".to_string()),
             machine_info.machine.points
         );
         prompt_field = "PROMPT=.*";
@@ -86,10 +107,27 @@ end"#,
     if result.contains("bash") || result.contains("zsh") {
         let file_content = std::fs::read_to_string(&file).unwrap_or_default();
         let regex = Regex::new(prompt_field).unwrap();
-        let new_file_content = regex.replace_all(&file_content, prompt);
-        std::fs::write(&file, new_file_content.as_ref()).unwrap_or_default();
+        // NoExpand: the prompt string contains '$' (e.g. \$(pwd), '$ '), which the
+        // regex engine would otherwise treat as capture-group references and mangle.
+        let new_file_content = if regex.is_match(&file_content) {
+            regex
+                .replace_all(&file_content, regex::NoExpand(prompt.as_str()))
+                .into_owned()
+        } else {
+            // No existing PS1/PROMPT line to replace — append ours so it still applies.
+            format!("{file_content}\n{prompt}\n")
+        };
+        std::fs::write(&file, new_file_content).unwrap_or_default();
     } else if result.contains("fish") {
         std::fs::write(&file, &prompt).unwrap_or_default();
+    }
+
+    if !file.is_empty() {
+        println!(
+            "{BYELLOW}Prompt written to {file}. To apply it to your CURRENT shell run:{RESET}"
+        );
+        println!("{BGREEN}    exec $SHELL{RESET}   {BYELLOW}(or open a new terminal){RESET}");
+        println!("{BYELLOW}Note: if you use starship, oh-my-zsh, or powerlevel10k, those frameworks regenerate the prompt on every command and will override this.{RESET}");
     }
 }
 
@@ -345,6 +383,13 @@ pub fn add_hosts(machine_info: &PlayingMachine) -> Result<(), Box<dyn std::error
 
         match yn.trim() {
             "y" | "Y" => {
+                // Safety net: never write a not-ready IP (empty or the literal
+                // string "null") into /etc/hosts.
+                if machine_info.ip.is_empty() || machine_info.ip == "null" {
+                    println!("{RED}No valid IP address available yet — skipping /etc/hosts entry.{RESET}");
+                    return Ok(());
+                }
+
                 let hosts_path = std::path::Path::new("/etc/hosts");
                 let domain_name = format!("{}.htb", machine_info.machine.name.split_whitespace().next().unwrap_or_default().to_string().to_lowercase()); // Using this set of func to remove the os icon after the machine name
                 print!("{BGREEN}Type the domain name to assign {RED}[{domain_name}]{BGREEN}: {RESET}");
