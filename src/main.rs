@@ -133,7 +133,7 @@ async fn main() {
             } else {
                 let is_starting_point = match args[2].as_str() {
                     "starting" | "sp" => true,
-                    "lab" | "machine" | "machines" => false,
+                    "labs" | "machine" | "machines" => false,
                     "fortress" | "fort" => {
                         eprintln!("\x1B[33mNote: Fortress VPN will use lab connection.\x1B[0m");
                         false

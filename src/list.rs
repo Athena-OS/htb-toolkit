@@ -14,14 +14,14 @@ pub async fn list_sp_machines() -> Vec<SPMachine> {
     for index in 1..=tiers {
         let mut sp_machine_list: Vec<SPMachine> = Vec::new();
         let tier_lvl = index - 1;
-        let tier_url = format!("https://labs.hackthebox.com/api/v4/sp/tier/{index}");
+        let tier_url = format!("https://labs.hackthebox.com/api/v5/machines?spTier={index}");
         let result = fetch_api_async(&tier_url, &appkey);
 
         match result.await {
             Ok(json_data) => {
                 println!("\x1B[92mDone.\x1B[0m\n");
 
-                for entry in json_data["data"]["machines"].as_array().unwrap().iter() {
+                for entry in json_data["data"].as_array().unwrap().iter() {
                     let id = entry["id"].as_u64().unwrap();
                     let name = entry["name"].as_str().unwrap_or("Name not available").to_string();
                     let os = entry["os"].as_str().unwrap_or("OS not available").to_string();

@@ -30,92 +30,55 @@ struct VpnAccess {
 
 async fn get_vpn_connections() -> Result<Vec<VpnAccess>, String> {
     let appkey = get_appkey();
-    let result = fetch_api_async("https://labs.hackthebox.com/api/v4/connections", &appkey).await;
+    let result = fetch_api_async("https://labs.hackthebox.com/api/v5/connections", &appkey).await;
 
     match result {
         Ok(json_value) => {
             let mut connections = Vec::new();
-            
-            if let Some(data) = json_value.get("data") {
-                // Parse lab (Machines)
-                if let Some(lab) = data.get("lab") {
-                    if let Some(true) = lab.get("can_access").and_then(|v| v.as_bool()) {
-                        let server = lab.get("assigned_server").and_then(|s| {
-                            Some(VpnServer {
-                                id: s.get("id")?.as_i64()?,
-                                friendly_name: s.get("friendly_name")?.as_str()?.to_string(),
-                                current_clients: s.get("current_clients")?.as_i64()?,
-                                location: s.get("location")?.as_str()?.to_string(),
-                            })
-                        });
-                        
-                        let location_type = lab.get("location_type_friendly")
-                            .and_then(|v| v.as_str())
-                            .ok_or("Missing location_type_friendly")?
-                            .to_string();
-                        
-                        connections.push(VpnAccess {
-                            access_type: "lab".to_string(),
-                            location_type,
-                            can_access: true,
-                            server,
-                        });
-                    }
-                }
 
-                // Parse starting_point
-                if let Some(sp) = data.get("starting_point") {
-                    if let Some(true) = sp.get("can_access").and_then(|v| v.as_bool()) {
-                        let server = sp.get("assigned_server").and_then(|s| {
-                            Some(VpnServer {
-                                id: s.get("id")?.as_i64()?,
-                                friendly_name: s.get("friendly_name")?.as_str()?.to_string(),
-                                current_clients: s.get("current_clients")?.as_i64()?,
-                                location: s.get("location")?.as_str()?.to_string(),
-                            })
-                        });
-                        
-                        let location_type = sp.get("location_type_friendly")
-                            .and_then(|v| v.as_str())
-                            .ok_or("Missing location_type_friendly")?
-                            .to_string();
-                        
-                        connections.push(VpnAccess {
-                            access_type: "starting_point".to_string(),
-                            location_type,
-                            can_access: true,
-                            server,
-                        });
-                    }
-                }
+            // `data` is an ARRAY of connection entries, not an object
+            let data = json_value
+                .get("data")
+                .and_then(|v| v.as_array())
+                .ok_or("Missing or invalid `data` array")?;
 
-                // Parse fortresses
-                if let Some(fort) = data.get("fortresses") {
-                    if let Some(true) = fort.get("can_access").and_then(|v| v.as_bool()) {
-                        let server = fort.get("assigned_server").and_then(|s| {
-                            Some(VpnServer {
-                                id: s.get("id")?.as_i64()?,
-                                friendly_name: s.get("friendly_name")?.as_str()?.to_string(),
-                                current_clients: s.get("current_clients")?.as_i64()?,
-                                location: s.get("location")?.as_str()?.to_string(),
-                            })
-                        });
-                        
-                        let location_type = fort.get("location_type_friendly")
-                            .and_then(|v| v.as_str())
-                            .ok_or("Missing location_type_friendly")?
-                            .to_string();
-                        
-                        connections.push(VpnAccess {
-                            access_type: "fortresses".to_string(),
-                            location_type,
-                            can_access: true,
-                            server,
-                        });
-                    }
-                }
+            for entry in data {
+                // Each entry is identified by its `type` field
+                let access_type = match entry.get("type").and_then(|v| v.as_str()) {
+                    Some(t) => t.to_string(),
+                    None => continue, // skip malformed entries
+                };
+
+                // `available` only appears on some entries (e.g. competitive).
+                // Absence means the entry is simply listed/accessible.
+                let can_access = entry
+                    .get("available")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+
+                let server = entry.get("assigned_server").and_then(|s| {
+                    Some(VpnServer {
+                        id: s.get("id")?.as_i64()?,
+                        friendly_name: s.get("friendly_name")?.as_str()?.to_string(),
+                        current_clients: s.get("current_clients")?.as_i64()?,
+                        location: s.get("location")?.as_str()?.to_string(),
+                    })
+                });
+
+                let location_type = entry
+                    .get("location_type_friendly")
+                    .and_then(|v| v.as_str())
+                    .ok_or("Missing location_type_friendly")?
+                    .to_string();
+
+                connections.push(VpnAccess {
+                    access_type,
+                    location_type,
+                    can_access,
+                    server,
+                });
             }
-            
+
             Ok(connections)
         }
         Err(err) => Err(format!("API error: {:?}", err)),
@@ -202,7 +165,7 @@ pub async fn run_vpn(is_starting_point: bool) {
         if is_starting_point {
             c.access_type == "starting_point"
         } else {
-            c.access_type == "lab"
+            c.access_type == "labs"
         }
     }).collect();
 

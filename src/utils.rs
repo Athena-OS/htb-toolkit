@@ -223,7 +223,7 @@ pub fn get_help() {
     println!("{} -l free", env::args().next().unwrap());
     println!("{} -m Eighteen", env::args().next().unwrap());
     println!("{} -u", env::args().next().unwrap());
-    println!("{} -v lab", env::args().next().unwrap());
+    println!("{} -v labs", env::args().next().unwrap());
     println!("{} -v starting", env::args().next().unwrap());
 }
 
