@@ -220,4 +220,4 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 # License
 
-This project is licensed under the GPL-3.0 License - see the LICENSE file for details.
+This project is licensed under the GPL-3.0 License. See the LICENSE file for details.
