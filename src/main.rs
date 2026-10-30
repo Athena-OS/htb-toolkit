@@ -131,20 +131,17 @@ async fn main() {
                 println!("  starting       - Connect to Starting Point VPN");
                 println!("  fortress       - Connect to Fortress VPN");
             } else {
-                let is_starting_point = match args[2].as_str() {
-                    "starting" | "sp" => true,
-                    "labs" | "machine" | "machines" => false,
-                    "fortress" | "fort" => {
-                        eprintln!("\x1B[33mNote: Fortress VPN will use lab connection.\x1B[0m");
-                        false
-                    }
+                let kind = match args[2].as_str() {
+                    "starting" | "sp" | "starting_point" => VpnKind::StartingPoint,
+                    "lab" | "labs" | "machine" | "machines" => VpnKind::Labs,
+                    "fortress" | "fort" | "fortresses" => VpnKind::Fortresses,
                     _ => {
                         eprintln!("\x1B[31mInvalid VPN type: {}\x1B[0m", args[2]);
                         println!("Valid types: lab, starting, fortress");
                         std::process::exit(1);
                     }
                 };
-                run_vpn(is_starting_point).await;
+                run_vpn(kind).await;
             }
         }
         _ => {

@@ -47,7 +47,7 @@ fn fetch_api(api_url: &str, appkey: &str) -> Result<serde_json::Value, reqwest::
         std::process::exit(1);
     }
 
-    let json_data = match serde_json::from_str(&response_text) {
+    let json_data: serde_json::Value = match serde_json::from_str(&response_text) {
         Ok(data) => data,
         Err(err) => {
             eprintln!("Check if your API key is incorrect or expired. Renew your API key by running 'htb-toolkit -k reset'. Error details: {err}");
@@ -58,6 +58,17 @@ fn fetch_api(api_url: &str, appkey: &str) -> Result<serde_json::Value, reqwest::
             std::process::exit(1);
         }
     };
+
+    // HTB retires endpoints with a 200 + {"message": "This endpoint has been removed..."}
+    // body. Surface that clearly instead of letting callers fail on a missing field.
+    if let Some(msg) = json_data.get("message").and_then(|m| m.as_str()) {
+        if msg.contains("endpoint has been removed") {
+            eprintln!("\x1B[31mHTB API endpoint no longer exists: {api_url}\x1B[0m");
+            eprintln!("Server says: {msg}");
+            eprintln!("Please update htb-toolkit or report this at https://github.com/Athena-OS/htb-toolkit/issues");
+            std::process::exit(1);
+        }
+    }
 
     Ok(json_data)
 }

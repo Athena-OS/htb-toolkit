@@ -1,116 +1,70 @@
 use crate::api::fetch_api_async;
 use crate::colors::*;
-use crate::utils::get_interface_ip;
+use crate::utils::get_vpn_interface_ip;
 use core::time::Duration;
 use std::fs;
 use std::process;
 use std::thread::sleep;
 
-pub async fn get_ip (appkey: &str) -> String {
+/// Extract the target IP from a `/api/v5/virtual_machine/active` body.
+/// Returns Ok(None) while the VM is still spawning (`info.ip` is null) and
+/// Err(()) when there is no active machine at all (`info` is null/absent).
+fn active_vm_ip(json_data: &serde_json::Value) -> Result<Option<String>, ()> {
+    let info = json_data.get("info").filter(|i| !i.is_null()).ok_or(())?;
+    let ip = info
+        .get("ip")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty() && *s != "null")
+        .map(|s| s.to_string());
+    Ok(ip)
+}
+
+/// Poll `/api/v5/virtual_machine/active` until the active VM has an IP.
+///
+/// Works the same for free, VIP/VIP+ and Starting Point machines: the v5
+/// endpoint reports `ip: null` plus `isSpawning: true` until the box is ready.
+/// (The old code special-cased Starting Point via `/api/v4/sp/profile/{id}`
+/// and VIP via the account's VPN name; neither is needed any more.)
+pub async fn get_ip(appkey: &str) -> String {
     let call_api: &str = "https://labs.hackthebox.com/api/v5/virtual_machine/active";
+    let max_attempts = 20; // 20 x 15s = 5 min cap
+    let wait = Duration::from_secs(15);
 
-    let result = fetch_api_async(call_api, appkey);
-    let mut machine_ip = String::new();
-
-    let account = User::get_user(appkey).await;
-        
-    //println!("Result: {:?}", result); // DEBUG: Print the result before the match
-
-    match result.await {
-        Ok(json_data) => {
-            //println!("Fetched JSON Data: {:?}", json_data); // Print the fetched JSON data
-            if let Some(info) = json_data.get("info") {
-                if info.is_null() {
+    for attempt in 1..=max_attempts {
+        match fetch_api_async(call_api, appkey).await {
+            Ok(json_data) => match active_vm_ip(&json_data) {
+                Ok(Some(ip)) => return ip,
+                Ok(None) => {
+                    if attempt < max_attempts {
+                        println!(
+                            "Machine is spawning, no IP yet... waiting {}s ({attempt}/{max_attempts})",
+                            wait.as_secs()
+                        );
+                        sleep(wait);
+                    }
+                }
+                Err(()) => {
                     eprintln!("\x1B[31mNo active machine detected.\x1B[0m");
-                    //process::exit(1); // Exit with a non-zero status code. It interrupts the entire program
-                    return machine_ip;
+                    return String::new();
                 }
-                if let Some(type_value) = info.get("type").and_then(|t| t.as_str()) {
-
-                    if type_value.contains("Starting Point") || account.vpnname.contains("VIP") { //If the machine is Starting Point type or if you are using a VIP or VIP+ VPN, the machine needs some min to generate the IP address (even if the machine is free)
-                        let mut get_req = String::new();
-                        if type_value.contains("Starting Point") {
-                            get_req = format!(                        
-                                "https://labs.hackthebox.com/api/v4/sp/profile/{}",                        
-                                &json_data["info"]["id"]
-                            );
-                        }
-                        else if account.vpnname.contains("VIP") {
-                            get_req = format!(                        
-                                "https://labs.hackthebox.com/api/v4/machine/profile/{}",                        
-                                &json_data["info"]["name"].as_str().unwrap()
-                            );
-                        }
-
-                        loop {
-                            let sub_result = fetch_api_async(&get_req, appkey);
-
-                            match sub_result.await {
-                                Ok(sub_json) => {
-                                    machine_ip = sub_json["info"]["ip"].as_str().unwrap_or_default().to_string();
-
-                                    if !machine_ip.is_empty() && machine_ip != "null" {
-                                        return machine_ip;
-                                    }
-                                    println!("Retrieving machine IP address... Wait 30 seconds...");
-                                    sleep(Duration::from_secs(30));
-                                }
-                                Err(err) => {
-                                    if err.is_timeout() {
-                                        eprintln!("Encountered timeout");
-                                    } else {
-                                        eprintln!("\x1B[31mError. Maybe your API key is incorrect or expired. Renew your API key by running htb-toolkit -k reset.\x1B[0m");
-                                    }
-                                    process::exit(1); // Exit with a non-zero status code
-                                }
-                            }
-                        }
-                    }
-                    else {
-                        // Regular machines: the profile endpoint can still return
-                        // "ip": null for a few seconds right after spawn, so poll
-                        // until it's populated instead of returning immediately.
-                        let machine_name = info
-                            .get("name")
-                            .and_then(|t| t.as_str())
-                            .expect("Machine name not found")
-                            .to_string();
-
-                        let max_attempts = 10; // ~5 min cap at 30s per attempt
-                        for attempt in 1..=max_attempts {
-                            let machine_info =
-                                PlayingMachine::get_machine(&machine_name, appkey).await;
-                            machine_ip = machine_info.ip;
-
-                            if !machine_ip.is_empty() && machine_ip != "null" {
-                                return machine_ip;
-                            }
-
-                            if attempt < max_attempts {
-                                println!("Retrieving machine IP address... Wait 30 seconds...");
-                                sleep(Duration::from_secs(30));
-                            }
-                        }
-
-                        eprintln!("\x1B[31mCould not retrieve the machine IP address after {max_attempts} attempts.\x1B[0m");
-                        return machine_ip; // returns ""/"null"; caller can decide
-                    }
+            },
+            Err(err) => {
+                if err.is_timeout() {
+                    eprintln!("Encountered timeout");
+                } else {
+                    eprintln!("\x1B[31mError. Maybe your API key is incorrect or expired. Renew your API key by running htb-toolkit -k reset.\x1B[0m");
                 }
+                process::exit(1); // Exit with a non-zero status code
             }
-            machine_ip
-        }
-        Err(err) => {
-            if err.is_timeout() {
-                eprintln!("Encountered timeout");
-            } else {
-                eprintln!("\x1B[31mError. Maybe your API key is incorrect or expired. Renew your API key by running htb-toolkit -k reset.\x1B[0m");
-            }
-            process::exit(1); // Exit with a non-zero status code
         }
     }
+
+    eprintln!("\x1B[31mCould not retrieve the machine IP address after {max_attempts} attempts.\x1B[0m");
+    String::new()
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct ActiveMachine {
     pub id: u64,
     pub name: String,
@@ -143,9 +97,10 @@ impl ActiveMachine {
                     }
                 }
                 let entry = &json_data["info"];
-                let id = entry["id"].as_u64().unwrap();
+                let id = entry["id"].as_u64().unwrap_or(0);
                 let name = entry["name"].as_str().unwrap_or("Name not available").to_string();
-                let ip = get_ip(appkey).await;
+                // v5 reports the IP inline (null while spawning); don't block here.
+                let ip = entry["ip"].as_str().unwrap_or_default().to_string();
                 let mtype = entry["type"].as_str().unwrap_or("null").to_string();
 
                 ActiveMachine {
@@ -290,23 +245,29 @@ impl PlayingMachine {
                             let sub_result = fetch_api_async(&tier_url, appkey);
                         
                             match sub_result.await {
-                                Ok(sub_json_data) => {                                
-                                    for entry in sub_json_data["data"].as_array().unwrap().iter() {
-                                        let id = entry["id"].as_u64().unwrap();
+                                Ok(sub_json_data) => {
+                                    let entries = sub_json_data["data"].as_array().cloned().unwrap_or_default();
+                                    for entry in entries.iter() {
+                                        let id = entry["id"].as_u64().unwrap_or(0);
                                         let name = entry["name"].as_str().unwrap_or("Name not available");
-                                        let points = entry["static_points"].as_u64().unwrap();
+                                        // v5 /machines uses `points`; keep `static_points` as a fallback for older payloads
+                                        let points = entry["points"].as_u64()
+                                            .or_else(|| entry["static_points"].as_u64())
+                                            .unwrap_or(0);
                                         let os = entry["os"].as_str().unwrap_or("OS not available").to_string();
                                         let difficulty_str = entry["difficultyText"].as_str().unwrap_or("Difficulty not available").to_string();
                                         let avatar_path = entry["avatar"].as_str().unwrap_or("Avatar not available").to_string();
-                                        let user_pwn = entry["userOwn"]
-                                            .as_bool().unwrap_or(false);
-                                        let root_pwn = entry["rootOwn"]
-                                            .as_bool().unwrap_or(false);
+                                        let user_pwn = entry["authUserInUserOwns"].as_bool()
+                                            .or_else(|| entry["userOwn"].as_bool())
+                                            .unwrap_or(false);
+                                        let root_pwn = entry["authUserInRootOwns"].as_bool()
+                                            .or_else(|| entry["rootOwn"].as_bool())
+                                            .unwrap_or(false);
                                         let sp_flag = true;
                                         let ip = String::new(); // Will be retrieved later
                                         let machine_name_os_icon = Self::get_os_icon(name, &os, "right");
-                                        
-                                        if name == machine_name {
+
+                                        if name.eq_ignore_ascii_case(machine_name) {
                                             println!("Found machine: {name}");
                                             return PlayingMachine {
                                                 machine: Machine {
@@ -336,15 +297,26 @@ impl PlayingMachine {
                                 }
                             }
                         }
+                        // Searched all tiers without a match: don't fall through to
+                        // the regular-machine parsing below (it would panic on a
+                        // "Machine not found" body).
+                        eprintln!("\x1B[31mNo machine named '{machine_name}' found among active or Starting Point machines.\x1B[0m");
+                        process::exit(1);
                     } else {
-                        eprintln!("\x1B[31mError fetching Starting Point data.\x1B[0m");
+                        eprintln!("\x1B[31mAPI error for machine '{machine_name}': {message}\x1B[0m");
                         process::exit(1); // Exit with a non-zero status code
                     }
                 }
-                
+
                 // Not SP Machines
                 let entry = &json_data["info"];
-                let id = entry["id"].as_u64().unwrap();
+                let id = match entry["id"].as_u64() {
+                    Some(id) => id,
+                    None => {
+                        eprintln!("\x1B[31mUnexpected response for machine '{machine_name}': {json_data}\x1B[0m");
+                        process::exit(1);
+                    }
+                };
                 let name = entry["name"]
                             .as_str()
                             .unwrap_or("Name not available")
@@ -399,48 +371,16 @@ impl PlayingMachine {
 #[derive(Clone)]
 pub struct User {
     pub name: String,
-    pub vpnname: String,
 }
 
 impl User {
-    /*pub fn new() -> Self {
-        User {
-            id: 0,
-            name: String::new(),
-            vpnname: String::new(),
-        }
-    }*/
-
     pub async fn get_user(appkey: &str) -> Self {
-        let id: u64;
-        let username: String;
-        let vpnname: String;
-
-        // Retrieve User username
-        let result = fetch_api_async("https://labs.hackthebox.com/api/v4/user/info", appkey);
-    
-        match result.await {
-            Ok(json_user) => {
-                id = json_user["info"]["id"].as_u64().unwrap();
-                username = json_user["info"]["name"].as_str().unwrap().to_string();
-
-                let user_id_url = format!("https://labs.hackthebox.com/api/v4/user/profile/basic/{id}");
-                let details = fetch_api_async(&user_id_url, appkey);
-    
-                match details.await {
-                    Ok(json_details) => {
-                        vpnname = json_details["profile"]["server"].as_str().unwrap().to_string();
-                    }
-                    Err(err) => {
-                        if err.is_timeout() {
-                            eprintln!("Encountered timeout");
-                        } else {
-                            eprintln!("\x1B[31mError. Maybe your API key is incorrect or expired. Renew your API key by running htb-toolkit -k reset.\x1B[0m");
-                        }
-                        process::exit(1); // Exit with a non-zero status code
-                    }
-                }                       
-            }
+        // Only the username is needed; the old extra call to
+        // /user/profile/basic/{id} fed a VIP-VPN heuristic that is gone now.
+        match fetch_api_async("https://labs.hackthebox.com/api/v4/user/info", appkey).await {
+            Ok(json_user) => User {
+                name: json_user["info"]["name"].as_str().unwrap_or("unknown").to_string(),
+            },
             Err(err) => {
                 if err.is_timeout() {
                     eprintln!("Encountered timeout");
@@ -449,11 +389,6 @@ impl User {
                 }
                 process::exit(1); // Exit with a non-zero status code
             }
-        }
-    
-        User {
-            name: username,
-            vpnname,
         }
     }
 }
@@ -465,32 +400,16 @@ pub struct PlayingUser {
 
 impl PlayingUser {
 
-    /*const USER: User = User {
-            id: 0,
-            name: String::new(),
-            vpnname: String::new(),
-        };
-    
-    pub fn new() -> Self {
-        PlayingUser {
-            user: Self::USER.clone(),
-            ip: String::new(),
-        }
-    }*/
-
-    // get_playinguser fetches for tun0 interface for attacker IP address
+    // get_playinguser looks for the VPN tunnel interface (tun0/tun1/wg*) to get the attacker IP address
     pub async fn get_playinguser(appkey: &str) -> Self {
         let mut userip: String = String::new();
         let account = User::get_user(appkey).await;
         // Retrieve User IP address
-        let interface_name = "tun0";
-        let ip_address = get_interface_ip(interface_name);
-    
-        match ip_address {
+        match get_vpn_interface_ip() {
             Some(ip) => {
                 userip = ip;
             }
-            None => println!("{RED}Failed to retrieve IP address of {interface_name}. Be sure your HTB VPN is active.{RESET}"),
+            None => println!("{RED}Failed to retrieve the VPN interface IP address. Be sure your HTB VPN is active.{RESET}"),
         }
 
         PlayingUser {
@@ -530,5 +449,27 @@ impl HTBConfig {
                 false
             }
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn active_vm_ip_states() {
+        // no active machine
+        assert_eq!(active_vm_ip(&json!({"info": null})), Err(()));
+        assert_eq!(active_vm_ip(&json!({})), Err(()));
+        // spawning: ip null
+        assert_eq!(
+            active_vm_ip(&json!({"info": {"id": 1, "name": "Lame", "type": "Starting Point", "isSpawning": true, "ip": null}})),
+            Ok(None)
+        );
+        // ready
+        assert_eq!(
+            active_vm_ip(&json!({"info": {"id": 1, "name": "Lame", "isSpawning": false, "ip": "10.129.1.2"}})),
+            Ok(Some("10.129.1.2".to_string()))
+        );
     }
 }

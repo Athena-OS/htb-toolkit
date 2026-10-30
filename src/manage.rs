@@ -57,8 +57,8 @@ pub async fn reset_machine() {
             Ok(reset_response) => {
                 if reset_response.status().is_success() {                    
                     //let reset_message = reset_response.text().await.expect("Failed to get response text."); //Print the response as text for debug
-                    let reset_message = reset_response.json::<serde_json::Value>().await.expect("Failed to parse JSON response. Probably there is no an Active Machine to reset.");
-                    let reset_message = reset_message.get("message").unwrap_or(&serde_json::Value::Null).as_str().unwrap();
+                    let reset_message = reset_response.json::<serde_json::Value>().await.unwrap_or(serde_json::Value::Null);
+                    let reset_message = reset_message.get("message").and_then(|m| m.as_str()).unwrap_or("Machine reset requested.");
                     println!("{BGREEN}{reset_message}{RESET}");
                 } else {
                     eprintln!("Failed to reset the machine. HTTP status code: {}", reset_response.status());
@@ -98,18 +98,8 @@ pub async fn stop_machine() {
     let appkey_clone = appkey.clone(); // Clone the necessary data
     let active_machine_clone = active_machine.clone(); // Clone other data if needed
 
-    // Currently they are not used but can be useful for the future
-    let _account = User::get_user(&appkey).await;
-    let _machine_type = active_machine.mtype;
-
     if !active_machine_clone.name.is_empty() { //If there is an active machine, stop it
-        /*let post_req:  String = if machine_type.contains("Starting Point") || (account.vpnname.contains("VIP") ) { //If you are using a VIP or VIP+ VPN, the machine can be stopped only by api/v4/vm/terminate API (even if the machine is free)
-            String::from("https://labs.hackthebox.com/api/v4/vm/terminate")
-        }
-        else {
-            String::from("https://labs.hackthebox.com/api/v4/machine/stop")
-        };*/
-
+        // vm/terminate works for free, VIP and Starting Point machines alike.
         let post_req = String::from("https://labs.hackthebox.com/api/v4/vm/terminate");
 
         let blocking_task = spawn(async move {
@@ -123,9 +113,14 @@ pub async fn stop_machine() {
                 .await
                 .expect("Error on POST request.");
 
-            let stop_message = stop_response.json::<serde_json::Value>().await.expect("Failed to parse JSON response.");
-            let stop_message = stop_message.get("message").unwrap_or(&serde_json::Value::Null).as_str().unwrap();
-            println!("{BGREEN}{stop_message}{RESET}");
+            let status = stop_response.status();
+            let stop_message = stop_response.json::<serde_json::Value>().await.unwrap_or(serde_json::Value::Null);
+            let stop_message = stop_message.get("message").and_then(|m| m.as_str()).unwrap_or("Machine termination requested.");
+            if status.is_success() {
+                println!("{BGREEN}{stop_message}{RESET}");
+            } else {
+                eprintln!("{RED}Failed to stop the machine (HTTP {status}): {stop_message}{RESET}");
+            }
         });
 
         // Await the result of the blocking task

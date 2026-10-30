@@ -13,7 +13,6 @@ use std::net::IpAddr;
 use std::path::Path;
 use tokio::fs::File as AsyncFile;
 use tokio::io::{AsyncWriteExt, BufWriter};
-use tokio::sync::mpsc;
 use users::{get_current_uid};
 
 pub fn check_root() {
@@ -27,7 +26,7 @@ pub fn check_root() {
 // HTB's VPN usually comes up as tun0, but it can be tun1, tun2, or a
 // WireGuard-style interface. Try the common names first, then fall back to any
 // interface whose name looks like a VPN tunnel. Never panics.
-fn get_vpn_interface_ip() -> Option<String> {
+pub fn get_vpn_interface_ip() -> Option<String> {
     for name in ["tun0", "tun1", "tun2"] {
         if let Some(ip) = get_interface_ip(name) {
             return Some(ip);
@@ -176,17 +175,15 @@ pub fn get_interface_ip(interface_name: &str) -> Option<String> {
     let interfaces = datalink::interfaces();
 
     // Find the desired interface by name
-    if let Some(interface) = interfaces.into_iter().find(|iface| iface.name == interface_name) {
-        // Iterate through the IP addresses of the interface
-        for addr in &interface.ips {
-            if let IpAddr::V4(ipv4) = addr.ip() { 
-                return Some(ipv4.to_string())
-            }
+    // Not finding the interface is a normal state (VPN down), so stay quiet;
+    // callers decide whether to report it.
+    let interface = interfaces.into_iter().find(|iface| iface.name == interface_name)?;
+    for addr in &interface.ips {
+        if let IpAddr::V4(ipv4) = addr.ip() {
+            return Some(ipv4.to_string());
         }
-    } else {
-        println!("Interface not found: {interface_name}");
     }
-    
+
     None // Return None if interface not found or IP not found
 }
 
@@ -261,7 +258,7 @@ pub fn get_help() {
     println!("{} -l free", env::args().next().unwrap());
     println!("{} -m Eighteen", env::args().next().unwrap());
     println!("{} -u", env::args().next().unwrap());
-    println!("{} -v labs", env::args().next().unwrap());
+    println!("{} -v lab", env::args().next().unwrap());
     println!("{} -v starting", env::args().next().unwrap());
 }
 
@@ -297,81 +294,96 @@ pub fn is_display_zero() -> bool {
     }
 }
 
+/// Machine names in lists carry an OS icon prefix ("<icon> Name") when the OS
+/// is Linux or Windows, and no prefix otherwise (FreeBSD, Solaris, Android...).
+/// Return the bare name in both cases.
+pub fn strip_os_icon(name: &str) -> &str {
+    match name.split_once(' ') {
+        Some((_, bare)) => bare,
+        None => name,
+    }
+}
+
+/// The `avatar` field used to be an S3 path ("/avatars/abc.png"); it is now a
+/// full URL (S3 or CDN). Only prefix the legacy S3 host when it's still a path.
+pub fn avatar_url(avatar: &str) -> String {
+    if avatar.starts_with("http://") || avatar.starts_with("https://") {
+        avatar.to_string()
+    } else if avatar.starts_with('/') {
+        format!("https://htb-mp-prod-public-storage.s3.eu-central-1.amazonaws.com{avatar}")
+    } else {
+        format!("https://htb-mp-prod-public-storage.s3.eu-central-1.amazonaws.com/{avatar}")
+    }
+}
+
+async fn download_avatar(client: &Client, url: &str, dest: &str) -> Result<(), String> {
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP error for {url}: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("Bad status code {} for: {url}", response.status()));
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read image data from {url}: {e}"))?;
+    let file = AsyncFile::create(dest)
+        .await
+        .map_err(|e| format!("Failed to create file {dest}: {e}"))?;
+    let mut writer = BufWriter::new(file);
+    writer
+        .write_all(&bytes)
+        .await
+        .map_err(|e| format!("Failed to write {dest}: {e}"))?;
+    writer.flush().await.map_err(|e| format!("Failed to flush {dest}: {e}"))?;
+    Ok(())
+}
+
 pub async fn htb_machines_to_flypie<T: CommonTrait>(
     machine_list: Vec<T>,
 ) -> Vec<Value> {
     let terminal = "shell-rocket -c";
-    let (sender, mut receiver) = mpsc::channel(machine_list.len());
-    let home = env::var("HOME").unwrap();
+    let home = env::var("HOME").unwrap_or_default();
     let avatar_dir = format!("{home}/.config/kando/icon-themes/avatar");
-    let _= fs::create_dir_all(&avatar_dir);
+    let _ = fs::create_dir_all(&avatar_dir);
+    let client = Client::new();
+
+    let mut entries = Vec::with_capacity(machine_list.len());
 
     for machine in machine_list.iter() {
-        let machine_name = machine.get_name().split_once(' ').unwrap().1;
-        let machine_avatar = machine.get_avatar().to_string();
-        let avatar_url = format!("https://htb-mp-prod-public-storage.s3.eu-central-1.amazonaws.com{machine_avatar}");
-        let avatar_filename = format!(
-            "{avatar_dir}/{machine_name}.png"
-        );
+        let machine_name = strip_os_icon(machine.get_name());
+        let url = avatar_url(machine.get_avatar());
+        let avatar_filename = format!("{avatar_dir}/{machine_name}.png");
 
-        let response = Client::new().get(&avatar_url).send().await;
-        match response {
-            Ok(response) => {
-                if response.status().is_success() {
-                    let image_data = response.bytes().await;
-                    match image_data {
-                        Ok(image_data) => {
-                            let avatar_file = AsyncFile::create(&avatar_filename).await;
-                            match avatar_file {
-                                Ok(avatar_file) => {
-                                    let mut writer = BufWriter::new(avatar_file);
-                                    if writer.write_all(&image_data).await.is_ok() {
-                                        let _ = sender.send(avatar_filename).await;
-                                    }
-                                }
-                                _ => eprintln!("Failed to create file: {avatar_filename:?}"),
-                            }
-                        }
-                        Err(err) => eprintln!("Failed to read image data: {err:?}"),
-                    }
-                } else {
-                    eprintln!("Bad status code for: {avatar_url}");
-                }
-            }
-            Err(err) => eprintln!("HTTP error for {avatar_url}: {err:?}"),
-        }
-    }
-
-    let mut avatar_filenames = Vec::new();
-    for _ in 0..machine_list.len() {
-        let received_avatar = receiver.recv().await.expect("Receive error");
-        avatar_filenames.push(received_avatar);
-    }
-
-    // Return Vec<Value> instead of formatted string
-    machine_list
-        .iter()
-        .zip(avatar_filenames.iter())
-        .map(|(machine, avatar_filename)| {
-            let machine_name = machine.get_name().split_once(' ').unwrap().1;
-            let icon_filename = Path::new(avatar_filename)
+        // A failed avatar must not abort (or hang) the whole menu update:
+        // fall back to no icon for that entry.
+        let icon_filename = match download_avatar(&client, &url, &avatar_filename).await {
+            Ok(()) => Path::new(&avatar_filename)
                 .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .to_string();
-            let machine_command = format!("{terminal} 'htb-toolkit -m {machine_name}'");
-            json!({
-                "name": machine_name,
-                "icon": icon_filename, // kando needs only the filename, not the entire path
-                "iconTheme": "avatar",
-                "type": "command",
-                "data": {
-                    "command": machine_command
-                },
-                "angle": -1
-            })
-        })
-        .collect()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            Err(err) => {
+                eprintln!("{err}");
+                String::new()
+            }
+        };
+
+        let machine_command = format!("{terminal} 'htb-toolkit -m {machine_name}'");
+        entries.push(json!({
+            "name": machine_name,
+            "icon": icon_filename, // kando needs only the filename, not the entire path
+            "iconTheme": "avatar",
+            "type": "command",
+            "data": {
+                "command": machine_command
+            },
+            "angle": -1
+        }));
+    }
+
+    entries
 }
 
 pub fn add_hosts(machine_info: &PlayingMachine) -> Result<(), Box<dyn std::error::Error>> {
@@ -442,5 +454,28 @@ pub fn add_hosts(machine_info: &PlayingMachine) -> Result<(), Box<dyn std::error
             "n" | "N" => return Ok(()),
             _ => println!("Invalid answer."),
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn avatar_url_handles_path_and_full_url() {
+        assert_eq!(
+            avatar_url("/avatars/abc.png"),
+            "https://htb-mp-prod-public-storage.s3.eu-central-1.amazonaws.com/avatars/abc.png"
+        );
+        assert_eq!(avatar_url("https://cdn.example/x.png"), "https://cdn.example/x.png");
+        assert_eq!(
+            avatar_url("https://htb-mp-prod-public-storage.s3.eu-central-1.amazonaws.com/avatars/a.png"),
+            "https://htb-mp-prod-public-storage.s3.eu-central-1.amazonaws.com/avatars/a.png"
+        );
+    }
+
+    #[test]
+    fn strip_os_icon_tolerates_missing_prefix() {
+        assert_eq!(strip_os_icon("\u{f17c} Lame"), "Lame");
+        assert_eq!(strip_os_icon("Sunday"), "Sunday");
     }
 }

@@ -23,7 +23,8 @@ struct ReviewData {
 struct FlagData {
     flag: String,
     id: u64,
-    difficulty: String,
+    /// 10..=100 in steps of 10; the v5 endpoint expects an integer
+    difficulty: u32,
 }
 
 pub async fn play_machine(machine_name: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -64,7 +65,17 @@ pub async fn play_machine(machine_name: &str) -> Result<(), Box<dyn std::error::
                         .expect("Missing or invalid 'message' field");
                     println!("{BGREEN}{message}{RESET}");
                 } else if response_status.as_u16() == 400 {
-                    // For Free VPN
+                    // Show why vm/spawn refused (e.g. "already have an active machine",
+                    // "VPN not connected") instead of silently trying the legacy call.
+                    let spawn_text = response.text().await.unwrap_or_default();
+                    let spawn_msg = serde_json::from_str::<Value>(&spawn_text)
+                        .ok()
+                        .and_then(|j| j["message"].as_str().map(|s| s.to_string()))
+                        .unwrap_or(spawn_text);
+                    eprintln!("{BYELLOW}vm/spawn refused: {spawn_msg}{RESET}");
+                    eprintln!("Trying the legacy free-tier play endpoint...");
+
+                    // For Free VPN (legacy)
                     let post_req = format!("https://labs.hackthebox.com/api/v4/machine/play/{}", machine_info.machine.id);
                     let response_play = client
                         .post(post_req)
@@ -152,7 +163,7 @@ pub async fn submit_flag() {
         .read_line(&mut machine_name)
         .expect("Failed to read line");
 
-    let machine_info = PlayingMachine::get_machine(&machine_name, &appkey).await;
+    let machine_info = PlayingMachine::get_machine(machine_name.trim(), &appkey).await;
 
     println!("{BCYAN}How much is the difficulty of this machine?{RESET}");
     println!();
@@ -175,19 +186,27 @@ pub async fn submit_flag() {
         .read_line(&mut machine_rating)
         .expect("Failed to read line");
 
+    let difficulty: u32 = match machine_rating.trim().parse::<u32>() {
+        Ok(d) if (10..=100).contains(&d) && d % 10 == 0 => d,
+        _ => {
+            eprintln!("{RED}Difficulty must be one of 10, 20, ..., 100.{RESET}");
+            std::process::exit(1);
+        }
+    };
+
     let blocking_task = spawn(async move {
         let flag_data = FlagData {
             flag: flag.trim().to_string(),
             id: machine_info.machine.id,
-            difficulty: machine_rating.trim().to_string(),
+            difficulty,
         };
 
         // Create a reqwest client
         let client = Client::new();
 
-        // Send the POST request to submit the flag
+        // Send the POST request to submit the flag (moved from v4 to v5)
         let response = client
-            .post("https://labs.hackthebox.com/api/v4/machine/own")
+            .post("https://labs.hackthebox.com/api/v5/machine/own")
             .json(&flag_data)
             .header("Content-Type", "application/json")
             .header("Authorization", format!("Bearer {appkey}"))
