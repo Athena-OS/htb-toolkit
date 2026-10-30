@@ -38,9 +38,11 @@ async fn main() {
     }
 
     // Initialization
-    // Create avatar folder for free machine icons
+    // Create the Kando icon theme holding the machine avatars (written by
+    // `-u`). Kando lists icon themes once, at start: a theme folder created
+    // while it runs stays unknown, and its icons blank, until it restarts.
     let home = env::var("HOME").unwrap_or_default();
-    let folder_path = format!("{home}/.local/share/icons/htb-toolkit/avatar");
+    let folder_path = format!("{home}/.config/kando/icon-themes/avatar");
 
     if fs::metadata(&folder_path).is_err() { // Create the folder only if it does not exist
         if let Err(err) = fs::create_dir_all(&folder_path) {

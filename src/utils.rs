@@ -341,10 +341,72 @@ async fn download_avatar(client: &Client, url: &str, dest: &str) -> Result<(), S
     Ok(())
 }
 
+/// Layout of Kando's menus.json. Kando 3 accepts only "button" and "submenu"
+/// items in a file whose "version" is 3 or later, and refuses to start on
+/// anything else. It migrates older files itself, but only files that are
+/// still old (no "version", or one below 3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KandoMenuFormat {
+    /// Kando < 3 (and Fly-Pie): typed items such as "command".
+    Legacy,
+    /// Kando 3: buttons with a select workflow.
+    V3,
+}
+
+impl KandoMenuFormat {
+    pub fn of(menus: &Value) -> Self {
+        let major = menus
+            .get("version")
+            .and_then(Value::as_str)
+            .and_then(|v| v.trim_start_matches('v').split('.').next())
+            .and_then(|m| m.parse::<u64>().ok());
+        match major {
+            Some(m) if m >= 3 => KandoMenuFormat::V3,
+            _ => KandoMenuFormat::Legacy,
+        }
+    }
+}
+
+/// The menu item that starts `machine_name`, in the layout of the menus.json
+/// it goes into. The V3 item is what Kando's own migration makes of the
+/// legacy one.
+pub fn machine_menu_entry(machine_name: &str, icon: &str, format: KandoMenuFormat) -> Value {
+    let command = format!("shell-rocket -c 'htb-toolkit -m {machine_name}'");
+    match format {
+        KandoMenuFormat::V3 => json!({
+            "type": "button",
+            "name": machine_name,
+            "icon": icon, // kando needs only the filename, not the entire path
+            "iconTheme": "avatar",
+            "selectWorkflow": {
+                "actions": [
+                    {
+                        "type": "execute-command",
+                        "command": command,
+                        "detached": true,
+                        "isolated": false
+                    },
+                    { "type": "close-menu" }
+                ]
+            }
+        }),
+        KandoMenuFormat::Legacy => json!({
+            "name": machine_name,
+            "icon": icon,
+            "iconTheme": "avatar",
+            "type": "command",
+            "data": {
+                "command": command
+            },
+            "angle": -1
+        }),
+    }
+}
+
 pub async fn htb_machines_to_flypie<T: CommonTrait>(
     machine_list: Vec<T>,
+    format: KandoMenuFormat,
 ) -> Vec<Value> {
-    let terminal = "shell-rocket -c";
     let home = env::var("HOME").unwrap_or_default();
     let avatar_dir = format!("{home}/.config/kando/icon-themes/avatar");
     let _ = fs::create_dir_all(&avatar_dir);
@@ -370,17 +432,7 @@ pub async fn htb_machines_to_flypie<T: CommonTrait>(
             }
         };
 
-        let machine_command = format!("{terminal} 'htb-toolkit -m {machine_name}'");
-        entries.push(json!({
-            "name": machine_name,
-            "icon": icon_filename, // kando needs only the filename, not the entire path
-            "iconTheme": "avatar",
-            "type": "command",
-            "data": {
-                "command": machine_command
-            },
-            "angle": -1
-        }));
+        entries.push(machine_menu_entry(machine_name, &icon_filename, format));
     }
 
     entries
@@ -471,6 +523,40 @@ mod tests {
             avatar_url("https://htb-mp-prod-public-storage.s3.eu-central-1.amazonaws.com/avatars/a.png"),
             "https://htb-mp-prod-public-storage.s3.eu-central-1.amazonaws.com/avatars/a.png"
         );
+    }
+
+    #[test]
+    fn kando_menu_format_follows_the_file_version() {
+        assert_eq!(KandoMenuFormat::of(&json!({"menus": []})), KandoMenuFormat::Legacy);
+        assert_eq!(KandoMenuFormat::of(&json!({"version": "1.8.0"})), KandoMenuFormat::Legacy);
+        assert_eq!(KandoMenuFormat::of(&json!({"version": "3.0.0"})), KandoMenuFormat::V3);
+        assert_eq!(KandoMenuFormat::of(&json!({"version": "3.0.1"})), KandoMenuFormat::V3);
+        assert_eq!(KandoMenuFormat::of(&json!({"version": "3.1.0-beta.1"})), KandoMenuFormat::V3);
+        assert_eq!(KandoMenuFormat::of(&json!({"version": "10.0.0"})), KandoMenuFormat::V3);
+    }
+
+    #[test]
+    fn kando_3_machine_entry_is_a_button() {
+        let entry = machine_menu_entry("Lame", "Lame.png", KandoMenuFormat::V3);
+        assert_eq!(
+            entry,
+            json!({
+                "type": "button",
+                "name": "Lame",
+                "icon": "Lame.png",
+                "iconTheme": "avatar",
+                "selectWorkflow": {"actions": [
+                    {"type": "execute-command", "command": "shell-rocket -c 'htb-toolkit -m Lame'",
+                     "detached": true, "isolated": false},
+                    {"type": "close-menu"}
+                ]}
+            })
+        );
+        // Kando 3 reads a set angle as fixed; -1 meant "automatic" before.
+        assert!(entry.get("angle").is_none());
+        let legacy = machine_menu_entry("Lame", "Lame.png", KandoMenuFormat::Legacy);
+        assert_eq!(legacy["type"], "command");
+        assert_eq!(legacy["data"]["command"], "shell-rocket -c 'htb-toolkit -m Lame'");
     }
 
     #[test]

@@ -180,12 +180,15 @@ pub async fn update_machines() -> Result<(), Box<dyn std::error::Error>> {
     //let output_config = format!("{}/.output_config.txt", home);
     let menu_path = PathBuf::from(format!("{home}/.config/kando/menus.json"));
 
-    // Free Machines
-    let free_machine_list = list_machines("free").await;
-    let fly_entries = htb_machines_to_flypie(free_machine_list).await;
-
+    // Kando 3 refuses to start on items of the older layout inside a Kando 3
+    // file, so the entries follow the layout of the file they go into.
     let menu_data = fs::read_to_string(&menu_path)?;
     let mut menu_json: Value = serde_json::from_str(&menu_data)?;
+    let format = KandoMenuFormat::of(&menu_json);
+
+    // Free Machines
+    let free_machine_list = list_machines("free").await;
+    let fly_entries = htb_machines_to_flypie(free_machine_list, format).await;
 
     // Navigate to root menu node
     let root_menu = menu_json
@@ -224,7 +227,7 @@ pub async fn update_machines() -> Result<(), Box<dyn std::error::Error>> {
             .cloned()
             .collect();
 
-        let fly_entries = htb_machines_to_flypie(tiered_list).await;
+        let fly_entries = htb_machines_to_flypie(tiered_list, format).await;
 
         let menu_data = fs::read_to_string(&menu_path)?;
         let mut menu_json: Value = serde_json::from_str(&menu_data)?;
